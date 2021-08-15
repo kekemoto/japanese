@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "es6",
+    "downlevelIteration": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["index.ts"]
+}

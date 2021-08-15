@@ -1,0 +1,14 @@
+{
+  "name": "japanese",
+  "version": "0.1.0",
+  "description": "Japanese programming language",
+  "main": "index.html",
+  "scripts": {
+    "build": "tsc"
+  },
+  "author": "kekemoto",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "typescript": "^4.3.5"
+  }
+}
