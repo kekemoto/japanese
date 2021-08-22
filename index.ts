@@ -110,31 +110,27 @@ class Lex {
 class Lexer {
   // TODO: 「なら」「違うなら」を区別できるようにしたい
   static run(script: string, line_number: number): Code {
-    let lexicals: Lex[] = [];
+    script = this.sanitize(script);
     let words = splitWords(script, Object.values(Const.define_words).flat());
 
+    let lexicals: Lex[] = [];
     for (let word of words) {
-      let token = this.tokenize(word, line_number);
-      if (token.none) continue;
-      lexicals.push(token.get);
+      lexicals.push(new Lex(word, line_number));
       if (word === "\n") line_number++;
     }
 
     return new Code(lexicals);
   }
+
   // 空白を消したり半角に変換したりする
-  static tokenize(string: string, line_number: number): Option<Lex> {
-    let str = string
+  private static sanitize(string: string): string {
+    return string
       .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (s) {
         return String.fromCharCode(s.charCodeAt(0) - 0xfee0);
       })
       .replace(/[（]/g, "(")
       .replace(/[）]/g, ")")
       .replace(/[　、\t ]/g, "");
-
-    if (str === "") return new None();
-
-    return new Some(new Lex(str, line_number));
   }
 }
 
@@ -483,13 +479,16 @@ class Code implements Iterator<Lex, Lex, never> {
 
     result.push(startWord);
 
-    let { code, hit } = this.readUntilEscape((lex) =>
-      endWords.includes(lex.value)
-    );
+    console.debug({ ...this });
+
+    let { code, hit } = this.readUntilEscape((lex) => {
+      console.debug(lex.value);
+      return endWords.includes(lex.value);
+    });
 
     if (!hit) {
       userSyntaxError(
-        `${endWords}が見つかりません。`,
+        `${endWords}が見つかりません。code: ${code.toString(" ")}`,
         positionMessage(startWord)
       );
     }

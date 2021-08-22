@@ -15,7 +15,6 @@ Const.define_words = {
     loop_target: ["を"],
     loop_count: ["回"],
     loop: ["繰り返す"],
-    exec: ["処理"],
     var_name: ["を"],
     var_value: ["とする"],
 };
@@ -403,9 +402,13 @@ class Code {
         const endWords = Const.define_words.evaluate_end;
         let result = [];
         result.push(startWord);
-        let { code, hit } = this.readUntilEscape((lex) => endWords.includes(lex.value));
+        console.debug({ ...this });
+        let { code, hit } = this.readUntilEscape((lex) => {
+            console.debug(lex.value);
+            return endWords.includes(lex.value);
+        });
         if (!hit) {
-            userSyntaxError(`${endWords}が見つかりません。`, positionMessage(startWord));
+            userSyntaxError(`${endWords}が見つかりません。code: ${code.toString(" ")}`, positionMessage(startWord));
         }
         return result.concat(code.lexicals);
     }
