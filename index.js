@@ -1,31 +1,32 @@
 "use strict";
-class Ok {
-    constructor(value) {
-        this.value = value;
-        this.ok = true;
-        this.err = false;
-    }
-    get get() {
-        return this.value;
-    }
-    map(callback) {
-        this.value = callback(this.value);
-        return this;
-    }
+// グローバル定数を定義
+class Const {
 }
-class Err {
-    constructor(value) {
-        this.value = value;
-        this.ok = false;
-        this.err = true;
-    }
-    get get() {
-        throw this.value;
-    }
-    map(_callback) {
-        return this;
-    }
-}
+// 字句を定義する
+Const.define_words = {
+    delimiter: ["\n", "。"],
+    string_start: ["「"],
+    string_end: ["」"],
+    evaluate_start: ["ここから", "("],
+    evaluate_end: ["ここまで", ")"],
+    if: ["もし"],
+    then: ["ならば"],
+    else: ["違うなら"],
+    loop_target: ["を"],
+    loop_count: ["回"],
+    loop: ["繰り返す"],
+    exec: ["処理"],
+    var_name: ["を"],
+    var_value: ["とする"],
+};
+// 囲って読み込む必要がある字句
+Const.enclose_start_words = [
+    Const.define_words.string_start,
+    Const.define_words.evaluate_start,
+    Const.define_words.if,
+];
+// 文字列リテラルの正規表現
+Const.string_regexp = new RegExp(`^${Const.define_words.string_start}(.*)${Const.define_words.string_end}$`, "i");
 class Some {
     constructor(value) {
         this.some = true;
@@ -58,46 +59,392 @@ class None {
         return this;
     }
 }
-class Scanner {
-    constructor(script, line_number) {
-        this.index = 0;
-        this.start_line_number = line_number;
-        this.lines = [];
-        for (let line of script.split("\n")) {
-            line = toHalfWidth(line).trim();
-            this.lines.push(line);
-        }
-    }
-    getLine() {
-        let result = this.lines[this.index];
-        this.index++;
-        if (result !== undefined) {
-            return new Some(result);
-        }
-        else {
-            return new None();
-        }
-    }
-    get line_number() {
-        return this.start_line_number + this.index;
+class Ok {
+    constructor(value) {
+        this.ok = true;
+        this.err = false;
+        this.value = value;
     }
 }
-class Block {
-    constructor(context) {
-        this.list = [];
-        this.context = context.branch();
+class Err {
+    constructor(value) {
+        this.ok = false;
+        this.err = true;
+        this.value = value;
     }
-    push(value) {
-        this.list.push(value);
+}
+// 字句の型
+class Lex {
+    constructor(value, line_number) {
+        this.value = value;
+        this.line_number = line_number;
+    }
+}
+// スクリプトを読み込んで、字句区切りで出力する
+class Lexer {
+    // TODO: 「なら」「違うなら」を区別できるようにしたい
+    static run(script, line_number) {
+        let lexicals = [];
+        let words = splitWords(script, Object.values(Const.define_words).flat());
+        for (let word of words) {
+            let token = this.tokenize(word, line_number);
+            if (token.none)
+                continue;
+            lexicals.push(token.get);
+            if (word === "\n")
+                line_number++;
+        }
+        return new Code(lexicals);
+    }
+    // 空白を消したり半角に変換したりする
+    static tokenize(string, line_number) {
+        let str = string
+            .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (s) {
+            return String.fromCharCode(s.charCodeAt(0) - 0xfee0);
+        })
+            .replace(/[（]/g, "(")
+            .replace(/[）]/g, ")")
+            .replace(/[　、\t ]/g, "");
+        if (str === "")
+            return new None();
+        return new Some(new Lex(str, line_number));
+    }
+}
+// 字句のコレクションを操作するためのクラス
+class Code {
+    constructor(lexicals) {
+        this.lexicals = lexicals;
+        this.index = 0;
+        this.indexStack = [];
+    }
+    // 終わりまで読み込んでいたら true
+    get isEnd() {
+        return this.lexicals[this.index] === undefined;
+    }
+    // 空のコードなら true
+    get isEmpty() {
+        if (this.isEnd)
+            return true;
+        return this.lexicals.every((i) => Const.define_words.delimiter.includes(i.value));
+    }
+    get size() {
+        return this.lexicals.length;
+    }
+    // 先頭にある字句の行数
+    get headLineNumber() {
+        if (this.lexicals.length === 0)
+            return new None();
+        return new Some(this.lexicals[0].line_number);
+    }
+    dup() {
+        let result = new Code([]);
+        result.lexicals = [...this.lexicals];
+        result.indexStack = [...this.indexStack];
+        result.index = this.index;
+        return result;
+    }
+    trim() {
+        let count = 0;
+        for (let lex of [...this.lexicals]) {
+            if (Const.define_words.delimiter.includes(lex.value)) {
+                count++;
+                this.lexicals.shift();
+            }
+            else {
+                break;
+            }
+        }
+        this.index = Math.max(0, this.index - count);
+        for (let i = this.lexicals.length - 1; 0 < i; i--) {
+            let lex = this.lexicals[i];
+            if (Const.define_words.delimiter.includes(lex.value)) {
+                this.lexicals.pop();
+            }
+            else {
+                break;
+            }
+        }
+    }
+    // 文字列に変換
+    toString(delimiter = "") {
+        return this.lexicals.map((i) => i.value).join(delimiter);
+    }
+    // 反復オブジェクトにする
+    [Symbol.iterator]() {
+        return this;
+    }
+    next() {
+        let result = this.readLex();
+        if (result.some) {
+            return { done: false, value: result.get };
+        }
+        else {
+            return { done: true, value: new Lex("", -1) };
+        }
+    }
+    // １つの字句だけ読み取る
+    readLex() {
+        if (this.isEnd)
+            return new None();
+        let lex = this.lexicals[this.index];
+        this.index++;
+        return new Some(lex);
+    }
+    // １つの字句だけ読み取るが、シークは動かない
+    peekLex() {
+        this.storeIndex();
+        let result = this.readLex();
+        this.restoreIndex();
+        return result;
+    }
+    // 終端から１つの字句だけ読み取る。シークは動かない
+    peekLastLex() {
+        let result = this.lexicals[this.lexicals.length - 1];
+        if (result === undefined) {
+            return new None();
+        }
+        else {
+            return new Some(result);
+        }
+    }
+    // １行読み取る。
+    readLine() {
+        if (this.isEnd)
+            return new None();
+        let lexicals = [];
+        for (;;) {
+            let lex = this.readLex();
+            if (lex.none)
+                break;
+            if (Const.define_words.delimiter.includes(lex.get.value)) {
+                lexicals.push(lex.get);
+                break;
+            }
+            if (this.isEnclose(lex.get)) {
+                lexicals = lexicals.concat(this.getEnclose(lex.get));
+                continue;
+            }
+            lexicals.push(lex.get);
+        }
+        let result = new Code(lexicals);
+        return new Some(result);
+    }
+    // １行読み取るが、シークは動かない。
+    peekLine() {
+        this.storeIndex();
+        let result = this.readLine();
+        this.restoreIndex();
+        return result;
+    }
+    // 残りの全てを読み取る
+    readRest() {
+        let lexicals = [];
+        for (;;) {
+            let lex = this.readLex();
+            if (lex.none)
+                break;
+            lexicals.push(lex.get);
+        }
+        return new Code(lexicals);
+    }
+    // fn が true を返すまでのコードを読み取る。true を返した字句も読み取る。
+    readUntilRaw(fn) {
+        let lexicals = [];
+        for (;;) {
+            let lex = this.readLex();
+            if (lex.none) {
+                return { code: new Code(lexicals), hit: false };
+            }
+            lexicals.push(lex.get);
+            if (fn(lex.get)) {
+                return { code: new Code(lexicals), hit: true };
+            }
+        }
+    }
+    // 条件を達成するまでのコードを読み取る。文字列などの囲いはエスケープする
+    //
+    // fn - 条件の達成を判定する
+    // option - {includeHit: 条件を達成した字句を結果に含めるかどうか}
+    readUntilEscape(fn, option = {}) {
+        // デフォルトオプションを設定する
+        option = {
+            includeHit: true,
+            ...option,
+        };
+        let lexicals = [];
+        for (;;) {
+            let lex = this.readLex();
+            if (lex.none) {
+                return { code: new Code(lexicals), hit: false };
+            }
+            if (this.isEnclose(lex.get)) {
+                lexicals = lexicals.concat(this.getEnclose(lex.get));
+                continue;
+            }
+            if (fn(lex.get)) {
+                if (option.includeHit)
+                    lexicals.push(lex.get);
+                return { code: new Code(lexicals), hit: true };
+            }
+            else {
+                lexicals.push(lex.get);
+            }
+        }
+    }
+    match(pattarn, callback) {
+        // pattern の中で CAPTURE_KEYWORD が出てきたら、次のキーワードが出てくるまで捕捉し続けることを意味する
+        const CAPTURE_KEYWORD = null;
+        let captureCount = 0;
+        let args = [];
+        pattarn = [...pattarn];
+        this.storeIndex();
+        // pattern に沿って解析していく
+        for (;;) {
+            let keywords = pattarn.shift();
+            if (keywords === undefined)
+                break;
+            if (keywords === CAPTURE_KEYWORD) {
+                // 捕捉キーワードだった場合
+                captureCount++;
+                keywords = pattarn.shift();
+                if (keywords === CAPTURE_KEYWORD) {
+                    never("キャプチャを2回続けて指定している");
+                }
+                if (keywords === undefined) {
+                    // never("キャプチャを終了するためのキーワードが存在しない
+                    args.push(this.readRest());
+                }
+                else {
+                    // 指定されたキーワードが出るまでを取得する
+                    let { code, hit } = this.readUntilEscape((lex) => { var _a; return (_a = keywords === null || keywords === void 0 ? void 0 : keywords.includes(lex.value)) !== null && _a !== void 0 ? _a : never(); }, { includeHit: false });
+                    if (!hit) {
+                        this.restoreIndex();
+                        return new None();
+                    }
+                    args.push(code);
+                }
+            }
+            else {
+                // 捕捉キーワードではなく、ただのキーワードだった場合
+                let { done, value: lex } = this.next();
+                if (done) {
+                    // keyword が存在しないまま解析が終了した
+                    this.restoreIndex();
+                    return new None();
+                }
+                if (!keywords.includes(lex.value)) {
+                    // keyword が一致しなかった
+                    this.restoreIndex();
+                    return new None();
+                }
+            }
+        }
+        if (captureCount !== args.length) {
+            never(`捕捉した数が一致していない。count: ${captureCount}, args: ${args}`);
+        }
+        this.resetIndexStack();
+        return new Some(callback(...args));
+    }
+    positionMessage() {
+        // TODO: エラー表示が親切にしたい
+        if (this.lexicals.length === 0)
+            never("コードが空です。");
+        const first_num = this.lexicals[0].line_number;
+        const last_num = this.lexicals[this.lexicals.length - 1].line_number;
+        let result = "";
+        if (first_num === last_num) {
+            result = `${first_num}行目くらい`;
+        }
+        else {
+            result = `${first_num}〜${last_num}行目くらい`;
+        }
+        return result;
+    }
+    storeIndex() {
+        this.indexStack.push(this.index);
+    }
+    restoreIndex() {
+        var _a;
+        this.index = (_a = this.indexStack.pop()) !== null && _a !== void 0 ? _a : never();
+    }
+    resetIndexStack() {
+        this.indexStack = [];
+    }
+    // ここから、もしなどの、キーワードで囲む語彙かどうかを判定する
+    isEnclose(lex) {
+        return Const.enclose_start_words.flat().includes(lex.value);
+    }
+    // ここから、もしなどの、キーワードで囲まれた部分を読み込む
+    getEnclose(startWord) {
+        if (Const.define_words.string_start.includes(startWord.value)) {
+            return this.getEncloseString(startWord);
+        }
+        else if (Const.define_words.evaluate_start.includes(startWord.value)) {
+            return this.getEncloseEvaluate(startWord);
+        }
+        else if (Const.define_words.if.includes(startWord.value)) {
+            return this.getEncloseIf(startWord);
+        }
+        else {
+            never();
+        }
+    }
+    getEncloseString(startWord) {
+        const endWords = Const.define_words.string_end;
+        let result = [];
+        result.push(startWord);
+        let { code, hit } = this.readUntilRaw((lex) => endWords.includes(lex.value));
+        if (!hit) {
+            userSyntaxError(`${endWords}が見つかりません。`, positionMessage(startWord));
+        }
+        return result.concat(code.lexicals);
+    }
+    getEncloseEvaluate(startWord) {
+        const endWords = Const.define_words.evaluate_end;
+        let result = [];
+        result.push(startWord);
+        let { code, hit } = this.readUntilEscape((lex) => endWords.includes(lex.value));
+        if (!hit) {
+            userSyntaxError(`${endWords}が見つかりません。`, positionMessage(startWord));
+        }
+        return result.concat(code.lexicals);
+    }
+    getEncloseIf(startWord) {
+        const thenWords = Const.define_words.then;
+        const delimiter = Const.define_words.delimiter;
+        let result = [];
+        // if ~ then までを取得
+        result.push(startWord);
+        let { code, hit } = this.readUntilEscape((lex) => thenWords.includes(lex.value));
+        if (!hit) {
+            userSyntaxError(`${thenWords}が見つかりません。`, positionMessage(startWord));
+        }
+        result = result.concat(code.lexicals);
+        // then ~ delimiter までを取得
+        ({ code, hit } = this.readUntilEscape((lex) => delimiter.includes(lex.value)));
+        result = result.concat(code.lexicals);
+        return result;
+    }
+}
+// 一連の手続きを表すクラス。ここから〜ここまで、のやつ
+class Procedure {
+    constructor(context) {
+        this.codes = [];
+        this.context = context;
+    }
+    push(code) {
+        this.codes.push(code);
     }
     run() {
-        let script = this.list.join("\n");
-        return run(script, this.context.branch());
+        let result;
+        for (let code of this.codes) {
+            result = parseExpression(code, this.context);
+        }
+        return result;
     }
 }
 class Context {
     constructor() {
-        this.line_number = 1;
         this.scope = {
             コンソール: console.log,
             アラート: alert,
@@ -107,12 +454,21 @@ class Context {
                 name: "表示",
                 caseParticles: ["を", "に"],
                 procedure: (args, context) => {
+                    var _a;
                     let variable = args["を"];
                     let output = args["に"];
                     if (typeof output !== "function") {
-                        userError(`「${output}」に表示することはできません。`, context);
+                        userArgumenntError(`「${output}」に表示することはできません。`, positionMessage((_a = context.parceCode) !== null && _a !== void 0 ? _a : never()));
                     }
                     output(variable);
+                },
+            },
+            {
+                name: "デバッグ表示",
+                caseParticles: ["を"],
+                procedure: (args, _context) => {
+                    let variable = args["を"];
+                    console.log(variable);
                 },
             },
             {
@@ -137,188 +493,209 @@ class Context {
     }
     branch() {
         let c = new Context();
-        c.line_number = this.line_number;
         c.scope = this.scope;
         c.functions = this.functions;
         return c;
     }
-    scannerGetLine() {
-        var _a;
-        let s = (_a = this.scanner) !== null && _a !== void 0 ? _a : never();
-        this.line_number++;
-        return s.getLine();
-    }
 }
-function run(script, context) {
+function parseExpression(code, context) {
+    code.trim();
+    context.parceCode = code.dup();
+    console.debug(context.parceCode);
+    if (code.isEmpty)
+        userSyntaxErrorByCode(code);
     let result;
-    context.scanner = new Scanner(script, context.line_number);
-    for (;;) {
-        let line = context.scannerGetLine();
-        if (line.none)
-            break;
-        result = parseExpression(line.get, context);
-    }
-    return result === null || result === void 0 ? void 0 : result.fetch(() => undefined);
+    result = parseIf(code, context);
+    if (result.some)
+        return result.get;
+    result = parseLoop(code, context);
+    if (result.some)
+        return result.get;
+    result = parseDefineVariable(code, context);
+    if (result.some)
+        return result.get;
+    result = parseEvaluate(code, context);
+    if (result.some)
+        return result.get;
+    result = parseCallFunction(code, context);
+    if (result.some)
+        return result.get;
+    result = parseCallVariable(code, context);
+    if (result.some)
+        return result.get;
+    result = parseLiteral(code, context);
+    if (result.some)
+        return result.get;
+    userSyntaxErrorByCode(context.parceCode);
 }
-function parseExpression(sentence, context) {
-    if (isEmptySentence(sentence)) {
+function parseIf(code, context) {
+    if (code.isEmpty)
         return new None();
-    }
+    const head = code.peekLex().get;
+    if (!Const.define_words.if.includes(head.value))
+        return new None();
     let result;
-    result = parseDefineVariable(sentence, context);
-    if (result.some)
-        return result;
-    result = parseIf(sentence, context);
-    if (result.some)
-        return result;
-    result = parseBlock(sentence, context);
-    if (result.some)
-        return result;
-    result = parseLiteral(sentence);
-    if (result.some)
-        return result;
-    result = parseCallFunction(sentence, context);
-    if (result.some)
-        return result;
-    result = parseCallVariable(sentence, context);
-    if (result.some)
-        return result;
-    userError(`構文エラー: ${sentence}`, context);
-}
-function parseBlock(sentence, context) {
-    var _a;
-    if (sentence == "ここから") {
-        let block = new Block(context);
-        for (;;) {
-            let result = context.scannerGetLine();
-            if (result.none)
-                userError("「ここまで」が見つかりませんでした。", context);
-            let line = result.get;
-            if (line.includes("ここまで")) {
-                let splinters = line.split("ここまで");
-                block.push((_a = splinters.shift()) !== null && _a !== void 0 ? _a : never());
-                context.proactiveExpression = block;
-                return parseBlockAfter(splinters.join(), context);
-            }
-            block.push(line);
-        }
-    }
-    return new None();
-}
-function parseBlockAfter(sentence, context) {
-    var _a;
-    let result;
-    let block = (_a = context.proactiveExpression) !== null && _a !== void 0 ? _a : never();
-    result = match(sentence, /を処理/, () => {
-        return block.run();
-    });
-    if (result.some)
-        return result;
-    result = match(sentence, /を(.*)回繰り返す/, (numStr) => {
-        let number = parseExpression(numStr, context).fetch(() => userError(`構文エラー: ${numStr}`, context));
-        if (typeof number !== "number")
-            userError(`引数エラー: ${numStr} は数値ではありません。`, context);
-        for (let i = 0; i < number; i++) {
-            block.run();
-        }
-    });
-    if (result.some)
-        return result;
-    userError(`構文エラー: ${sentence}`, context);
-}
-function parseLiteral(sentence) {
-    let result;
-    result = match(sentence, /^([+-]?\d+(?:\.\d+)?)$/, (num) => {
-        return Number(toHalfWidth(num));
-    });
-    if (result.some)
-        return result;
-    result = match(sentence, /^「(.*)」$/, (str) => {
-        return str;
-    });
-    if (result.some)
-        return result;
-    result = match(sentence, /^(正しい|正しくない)$/, (str) => {
-        return str == "正しい";
-    });
-    if (result.some)
-        return result;
-    return new None();
-}
-function isEmptySentence(sentence) {
-    return /^\s*$/.test(sentence);
-}
-function parseDefineVariable(sentence, context) {
-    return match(sentence, /(.*)を(.*)とする/, (name, value) => {
-        let result = parseExpression(value, context);
-        context.scope[name] = result.fetch(() => userError(`構文エラー：${value}`, context));
-    });
-}
-function parseIf(sentence, context) {
-    let result;
-    result = match(sentence, /もし(.*)ならば(.*)違うなら(.*)/, (condition, then_sentence, else_sentence) => {
-        let result = parseExpression(condition, context);
-        if (result.fetch(() => userError(`構文エラー：${condition}`, context))) {
-            result = parseExpression(then_sentence, context);
-            return result.fetch(() => userError(`構文エラー：${then_sentence}`, context));
+    const ifWord = Const.define_words.if;
+    const thenWord = Const.define_words.then;
+    const elseWord = Const.define_words.else;
+    const delimiter = Const.define_words.delimiter;
+    // 真偽値の判定をする関数
+    const isTrue = (value) => {
+        return !(value === false || value === undefined || value === null);
+    };
+    const ifThenElseHnadler = (conditionCode, thenCode, elseCode) => {
+        let condition = parseExpression(conditionCode, context);
+        if (isTrue(condition)) {
+            return parseExpression(thenCode, context);
         }
         else {
-            result = parseExpression(else_sentence, context);
-            return result.fetch(() => userError(`構文エラー：${else_sentence}`, context));
+            return parseExpression(elseCode, context);
         }
-    });
+    };
+    result = code.match([ifWord, null, thenWord, null, elseWord, null, delimiter], ifThenElseHnadler);
     if (result.some)
         return result;
-    result = match(sentence, /もし(.*)ならば(.*)/, (condition, then_sentence) => {
-        let result = parseExpression(condition, context);
-        if (result.fetch(() => userError(`構文エラー：${condition}`, context))) {
-            result = parseExpression(then_sentence, context);
-            return result.fetch(() => userError(`構文エラー：${then_sentence}`, context));
-        }
-    });
+    result = code.match([ifWord, null, thenWord, null, elseWord, null], ifThenElseHnadler);
     if (result.some)
         return result;
-    return new None();
+    const ifThenHandler = (conditionCode, thenCode) => {
+        let condition = parseExpression(conditionCode, context);
+        if (isTrue(condition)) {
+            return parseExpression(thenCode, context);
+        }
+    };
+    result = code.match([ifWord, null, thenWord, null, delimiter], ifThenHandler);
+    if (result.some)
+        return result;
+    result = code.match([ifWord, null, thenWord, null], ifThenHandler);
+    if (result.some)
+        return result;
+    userSyntaxErrorByCode(code);
 }
-function parseCallFunction(sentence, context) {
-    for (let f of context.functions) {
-        if (sentence.includes(f.name)) {
-            return new Some(applyFunction(f, sentence, context));
+function parseLoop(code, context) {
+    const tail = code.peekLastLex();
+    if (tail.none)
+        return new None();
+    if (!Const.define_words.loop.includes(tail.get.value))
+        return new None();
+    const loop = Const.define_words.loop;
+    const count = Const.define_words.loop_count;
+    const target = Const.define_words.loop_target;
+    let result;
+    result = code.match([null, target, null, count, loop], (targetCode, countCode) => {
+        for (let i = 0; i < parseExpression(countCode, context); i++) {
+            parseExpression(targetCode.dup(), context);
         }
+        return undefined;
+    });
+    if (result.some)
+        return result;
+    result = code.match([null, count, null, target, loop], (countCode, targetCode) => {
+        for (let i = 0; i < parseExpression(countCode, context); i++) {
+            parseExpression(targetCode.dup(), context);
+        }
+        return undefined;
+    });
+    if (result.some)
+        return result;
+    userSyntaxErrorByCode(code);
+}
+function parseEvaluate(code, context) {
+    let head = code.peekLex();
+    if (head.none)
+        return new None();
+    if (!Const.define_words.evaluate_start.includes(head.get.value)) {
+        return new None();
+    }
+    return code.match([Const.define_words.evaluate_start, null, Const.define_words.evaluate_end], (code) => runCode(code, context));
+}
+function parseLiteral(code, _context) {
+    var _a;
+    const text = code.toString();
+    let match = Const.string_regexp.exec(text);
+    if (match) {
+        match.shift();
+        return new Some((_a = match.shift()) !== null && _a !== void 0 ? _a : never());
+    }
+    if (/^([+-]?\d+(?:\.\d+)?)$/.test(text)) {
+        return new Some(Number(text));
+    }
+    if ("真" === text) {
+        return new Some(true);
+    }
+    if ("偽" === text) {
+        return new Some(false);
+    }
+    if ("空" === text) {
+        return new Some(undefined);
     }
     return new None();
 }
-function applyFunction(funcData, sentence, context) {
+function parseDefineVariable(code, context) {
+    return code.match([null, Const.define_words.var_name, null, Const.define_words.var_value], (nameCode, valueCode) => {
+        context.scope[nameCode.toString()] = parseExpression(valueCode, context);
+    });
+}
+// TODO: リテラルの中の助詞を無視するようにする
+function parseCallFunction(code, context) {
+    let f = findFunction(code, context.functions);
+    if (f === undefined) {
+        return new None();
+    }
+    else {
+        return new Some(applyFunction(f, code, context));
+    }
+}
+function findFunction(code, functions) {
+    let result = undefined;
+    const sentence = code.toString();
+    let maxIndex = 0;
+    for (let f of functions) {
+        let index = sentence.indexOf(f.name);
+        if (index === -1)
+            continue;
+        const text = sentence.slice(0, index);
+        let flag = f.caseParticles.every((particle) => text.includes(particle));
+        if (!flag)
+            continue;
+        if (maxIndex < index) {
+            result = f;
+            maxIndex = index;
+        }
+    }
+    return result;
+}
+function applyFunction(funcData, code, context) {
+    let sentence = code.toString();
     let index = sentence.indexOf(funcData.name);
     sentence = sentence.slice(0, index);
     let args = {};
-    let noun = "";
+    let noun = undefined;
     let tokens = splitWords(sentence, funcData.caseParticles);
     for (let token of tokens) {
         if (funcData.caseParticles.some((i) => i === token)) {
-            let result = parseExpression(noun, context);
-            args[token] = result.fetch(() => userError(`構文エラー：${noun}`, context));
+            if (noun === undefined) {
+                userSyntaxErrorByCode(context.parceCode, "引数が指定されていません。");
+            }
+            args[token] = parseExpression(noun, context);
         }
         else {
-            noun = token;
+            let num = code.headLineNumber;
+            if (num.none) {
+                userSyntaxErrorByCode(context.parceCode, "引数が指定されていません。");
+            }
+            noun = Lexer.run(token, num.get);
         }
     }
     return funcData.procedure(args, context);
 }
-function parseCallVariable(sentence, context) {
-    if (context.scope.hasOwnProperty(sentence)) {
-        return new Some(context.scope[sentence]);
+function parseCallVariable(code, context) {
+    if (context.scope.hasOwnProperty(code.toString())) {
+        return new Some(context.scope[code.toString()]);
     }
     else {
         return new None();
     }
-}
-function match(string, regexp, func) {
-    let m = regexp.exec(string);
-    if (m === null)
-        return new None();
-    let result = func(...m.slice(1));
-    return new Some(result);
 }
 function splitWords(text, words) {
     return recSplitWords([text], [...words]);
@@ -356,29 +733,62 @@ function splitWord(text, word) {
     }
     return result;
 }
-// 半角に変換する
-function toHalfWidth(string) {
-    return string
-        .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (s) {
-        return String.fromCharCode(s.charCodeAt(0) - 0xfee0);
-    })
-        .replace(/[　、]/g, "");
+function userSyntaxErrorByCode(code, message = undefined) {
+    if (code === undefined)
+        never("コンテキストの解析中のコードが空です。");
+    if (message === undefined) {
+        message = code.toString(" ");
+    }
+    else {
+        message = `${message} : ${code.toString(" ")}`;
+    }
+    userSyntaxError(message, positionMessage(code));
 }
-function userError(message, context) {
-    let text = `${message} : ${context.line_number}行目ぐらい`;
-    throw new Error(text);
+function userSyntaxError(message, position) {
+    userError("構文エラー", message, position);
 }
-function never() {
-    throw new Error("never");
+function userArgumenntError(message, position) {
+    userError("引数エラー", message, position);
 }
-function debug(...value) {
-    console.log("====", ...value);
+function userError(type, message, position) {
+    throw new Error(`${type} : ${message} : ${position}`);
+}
+function positionMessage(code) {
+    if (!(code instanceof Code)) {
+        return `${code.line_number}行目くらい`;
+    }
+    return code.positionMessage();
+}
+function never(message = "never") {
+    throw new Error(message);
 }
 /*
-expression = if | for | block | litral | func_call | variable
-block = ここから、(expression\n)*、expression?、ここまで
-if = もし、expression、ならば、expression、（違えば、expression、）？
-for = expression、を繰り返す
-func_call = （expression、格助詞）＊関数名
-litral = 数値！文字列！真偽値
+statement = define_var | if | loop | call_func
+define_var = symbol、を、expression、とする
+if = もし、expression、ならば、expression、(違えば、expression)?
+loop = expression、を繰り返す
+call_func = (expression、格助詞)*、関数名.*
+expression = statement | litral | procedure | symbol
+litral = 数値|文字列|真偽値
+symbol = .*
 */
+function run(script, line_number, context) {
+    let result;
+    let code = Lexer.run(script, line_number);
+    runCode(code, context);
+    return result;
+}
+function runCode(code, context) {
+    let result;
+    for (;;) {
+        let line = code.readLine();
+        if (line.none)
+            break;
+        line.get.trim();
+        if (line.get.isEmpty)
+            continue;
+        result = parseExpression(line.get, context);
+    }
+    return result;
+}
+//# sourceMappingURL=index.js.map
