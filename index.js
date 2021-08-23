@@ -19,6 +19,9 @@ Const.define_words = {
     var_value: ["とする"],
 };
 // 囲って読み込む必要がある字句
+//
+// 例：ここから〜ここまで、「〜」、もし〜なら
+// 囲いがあって中の文字列はエスケープする必要があるやつ。
 Const.enclose_start_words = [
     Const.define_words.string_start,
     Const.define_words.evaluate_start,
@@ -83,30 +86,25 @@ class Lex {
 class Lexer {
     // TODO: 「なら」「違うなら」を区別できるようにしたい
     static run(script, line_number) {
-        let lexicals = [];
+        script = this.sanitize(script);
         let words = splitWords(script, Object.values(Const.define_words).flat());
+        let lexicals = [];
         for (let word of words) {
-            let token = this.tokenize(word, line_number);
-            if (token.none)
-                continue;
-            lexicals.push(token.get);
+            lexicals.push(new Lex(word, line_number));
             if (word === "\n")
                 line_number++;
         }
         return new Code(lexicals);
     }
     // 空白を消したり半角に変換したりする
-    static tokenize(string, line_number) {
-        let str = string
+    static sanitize(string) {
+        return string
             .replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (s) {
             return String.fromCharCode(s.charCodeAt(0) - 0xfee0);
         })
             .replace(/[（]/g, "(")
             .replace(/[）]/g, ")")
             .replace(/[　、\t ]/g, "");
-        if (str === "")
-            return new None();
-        return new Some(new Lex(str, line_number));
     }
 }
 // 字句のコレクションを操作するためのクラス
@@ -126,15 +124,19 @@ class Code {
             return true;
         return this.lexicals.every((i) => Const.define_words.delimiter.includes(i.value));
     }
-    get size() {
-        return this.lexicals.length;
-    }
     // 先頭にある字句の行数
     get headLineNumber() {
         if (this.lexicals.length === 0)
             return new None();
         return new Some(this.lexicals[0].line_number);
     }
+    // 最後尾にある字句の行数
+    get tailLineNumber() {
+        if (this.lexicals.length === 0)
+            return new None();
+        return new Some(this.lexicals[this.lexicals.length - 1].line_number);
+    }
+    // 参照ではなく値をコピーして作成する
     dup() {
         let result = new Code([]);
         result.lexicals = [...this.lexicals];
@@ -142,6 +144,7 @@ class Code {
         result.index = this.index;
         return result;
     }
+    // 両端にある空白の字句を削除する
     trim() {
         let count = 0;
         for (let lex of [...this.lexicals]) {
@@ -246,7 +249,8 @@ class Code {
         }
         return new Code(lexicals);
     }
-    // fn が true を返すまでのコードを読み取る。true を返した字句も読み取る。
+    // fn が true を返すまでのコードを読み取る。
+    // 囲いがあってもエスケープしない。true を返した字句も読み取る。
     readUntilRaw(fn) {
         let lexicals = [];
         for (;;) {
@@ -290,6 +294,7 @@ class Code {
             }
         }
     }
+    // パターンとマッチするかどうか、マッチした場合はキャプチャした Code をコールバックする
     match(pattarn, callback) {
         // pattern の中で CAPTURE_KEYWORD が出てきたら、次のキーワードが出てくるまで捕捉し続けることを意味する
         const CAPTURE_KEYWORD = null;
@@ -344,12 +349,13 @@ class Code {
         this.resetIndexStack();
         return new Some(callback(...args));
     }
+    // ユーザー側のエラーが出た際に、行数などの位置情報のメッセージを作成する
     positionMessage() {
         // TODO: エラー表示が親切にしたい
         if (this.lexicals.length === 0)
             never("コードが空です。");
-        const first_num = this.lexicals[0].line_number;
-        const last_num = this.lexicals[this.lexicals.length - 1].line_number;
+        const first_num = this.headLineNumber.get;
+        const last_num = this.tailLineNumber.get;
         let result = "";
         if (first_num === last_num) {
             result = `${first_num}行目くらい`;
@@ -402,9 +408,8 @@ class Code {
         const endWords = Const.define_words.evaluate_end;
         let result = [];
         result.push(startWord);
-        console.debug({ ...this });
+        // TODO: 全部の囲い字句を Escape してはダメ。自分と同じ字句のみエスケープする必要がある
         let { code, hit } = this.readUntilEscape((lex) => {
-            console.debug(lex.value);
             return endWords.includes(lex.value);
         });
         if (!hit) {
@@ -418,6 +423,7 @@ class Code {
         let result = [];
         // if ~ then までを取得
         result.push(startWord);
+        // TODO: 全部の囲い字句を Escape してはダメ。自分と同じ字句のみエスケープする必要がある
         let { code, hit } = this.readUntilEscape((lex) => thenWords.includes(lex.value));
         if (!hit) {
             userSyntaxError(`${thenWords}が見つかりません。`, positionMessage(startWord));
@@ -429,23 +435,7 @@ class Code {
         return result;
     }
 }
-// 一連の手続きを表すクラス。ここから〜ここまで、のやつ
-class Procedure {
-    constructor(context) {
-        this.codes = [];
-        this.context = context;
-    }
-    push(code) {
-        this.codes.push(code);
-    }
-    run() {
-        let result;
-        for (let code of this.codes) {
-            result = parseExpression(code, this.context);
-        }
-        return result;
-    }
-}
+// パーサー中の文脈情報。変数のスコープなど
 class Context {
     constructor() {
         this.scope = {
@@ -494,13 +484,19 @@ class Context {
             },
         ];
     }
-    branch() {
-        let c = new Context();
-        c.scope = this.scope;
-        c.functions = this.functions;
-        return c;
-    }
 }
+/*
+作るときに使ったメモ書き程度の文法規則。全然厳密じゃないし更新してない
+
+statement = define_var | if | loop | call_func
+define_var = symbol、を、expression、とする
+if = もし、expression、ならば、expression、(違えば、expression)?
+loop = expression、を繰り返す
+call_func = (expression、格助詞)*、関数名.*
+expression = statement | litral | procedure | symbol
+litral = 数値|文字列|真偽値
+symbol = .*
+*/
 function parseExpression(code, context) {
     code.trim();
     context.parceCode = code.dup();
@@ -700,6 +696,7 @@ function parseCallVariable(code, context) {
         return new None();
     }
 }
+// 文字列を指定されたワードで分割する。分割に使ったワードも残る
 function splitWords(text, words) {
     return recSplitWords([text], [...words]);
 }
@@ -714,6 +711,7 @@ function recSplitWords(text_list, words) {
     }
     return recSplitWords(result, words);
 }
+// 文字列を指定されたワードで分割する。分割に使ったワードも残る
 function splitWord(text, word) {
     let index = text.indexOf(word);
     if (index === -1) {
@@ -736,7 +734,9 @@ function splitWord(text, word) {
     }
     return result;
 }
+// にほんごプログラミングを使っているユーザー向けのエラー
 function userSyntaxErrorByCode(code, message = undefined) {
+    // TODO: 無くしたい。過去のコードをスタックに積むか？
     if (code === undefined)
         never("コンテキストの解析中のコードが空です。");
     if (message === undefined) {
@@ -747,15 +747,19 @@ function userSyntaxErrorByCode(code, message = undefined) {
     }
     userSyntaxError(message, positionMessage(code));
 }
+// にほんごプログラミングを使っているユーザー向けのエラー
 function userSyntaxError(message, position) {
     userError("構文エラー", message, position);
 }
+// にほんごプログラミングを使っているユーザー向けのエラー
 function userArgumenntError(message, position) {
     userError("引数エラー", message, position);
 }
+// にほんごプログラミングを使っているユーザー向けのエラー
 function userError(type, message, position) {
     throw new Error(`${type} : ${message} : ${position}`);
 }
+// エラーの位置情報
 function positionMessage(code) {
     if (!(code instanceof Code)) {
         return `${code.line_number}行目くらい`;
@@ -765,21 +769,11 @@ function positionMessage(code) {
 function never(message = "never") {
     throw new Error(message);
 }
-/*
-statement = define_var | if | loop | call_func
-define_var = symbol、を、expression、とする
-if = もし、expression、ならば、expression、(違えば、expression)?
-loop = expression、を繰り返す
-call_func = (expression、格助詞)*、関数名.*
-expression = statement | litral | procedure | symbol
-litral = 数値|文字列|真偽値
-symbol = .*
-*/
-function run(script, line_number, context) {
-    let result;
-    let code = Lexer.run(script, line_number);
-    runCode(code, context);
-    return result;
+// スクリプトを実行する
+function run(script, context) {
+    context !== null && context !== void 0 ? context : (context = new Context());
+    let code = Lexer.run(script, 1);
+    return runCode(code, context);
 }
 function runCode(code, context) {
     let result;
